@@ -1,4 +1,4 @@
-use crate::{roam, schema};
+use crate::{embeddings, roam, schema};
 use diesel::prelude::*;
 use eyre::{Result, WrapErr};
 use tracing::instrument;
@@ -7,21 +7,30 @@ use tracing::instrument;
 #[diesel(table_name = schema::roam_page)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct RoamPage {
-    title: String,
-    create_time: Option<i64>,
-    edit_time: i64,
+    pub title: String,
+    pub create_time: Option<i64>,
+    pub edit_time: i64,
 }
 
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = schema::roam_item)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct RoamItem {
-    id: String,
-    parent_page_id: Option<String>,
-    parent_item_id: Option<String>,
-    contents: String,
-    create_time: Option<i64>,
-    edit_time: Option<i64>,
+    pub id: String,
+    pub parent_page_id: Option<String>,
+    pub parent_item_id: Option<String>,
+    pub contents: String,
+    pub create_time: Option<i64>,
+    pub edit_time: Option<i64>,
+}
+
+#[derive(Queryable, Selectable, Insertable, Debug)]
+#[diesel(table_name = schema::item_embedding)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct ItemEmbedding {
+    pub item_id: String,
+    pub embedded_text: String,
+    pub embedding: embeddings::Embedding,
 }
 
 /// Load a page into the database. Returns the number of items inserted.

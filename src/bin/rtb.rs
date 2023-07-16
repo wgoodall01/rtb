@@ -4,10 +4,10 @@ use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use eyre::eyre;
 use eyre::{ContextCompat, Result, WrapErr};
-use rtb::roam;
+use rtb::{roam, schema};
 use std::path::PathBuf;
 use tokio;
-use tracing::{debug_span, info, info_span, instrument};
+use tracing::{debug_span, info, info_span, instrument, trace};
 
 /// Embed Diesel migrations into the binary.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -29,6 +29,7 @@ struct Args {
 #[derive(clap::Parser)]
 enum Subcommand {
     Import(Import),
+    UpdateEmbeddings(UpdateEmbeddings),
 }
 
 #[tokio::main]
@@ -89,6 +90,9 @@ async fn main() -> Result<()> {
     // Execute the subcommand.
     let result = match args.cmd {
         Subcommand::Import(import) => exec_import(&mut db_conn, &import).await,
+        Subcommand::UpdateEmbeddings(update_embeddings) => {
+            exec_update_embeddings(&mut db_conn, &update_embeddings).await
+        }
     };
 
     // Attempt to run 'pragma optimize'
@@ -171,6 +175,91 @@ async fn exec_import(conn: &mut SqliteConnection, args: &Import) -> Result<()> {
         Ok(())
     })
     .wrap_err("Failed to load pages to database")?;
+
+    Ok(())
+}
+
+#[derive(clap::Parser, Debug)]
+struct UpdateEmbeddings {
+    /// OpenAI API key.
+    #[clap(long, env = "OPENAI_API_KEY")]
+    openai_api_key: String,
+}
+
+#[instrument(skip_all)]
+async fn exec_update_embeddings(
+    conn: &mut SqliteConnection,
+    args: &UpdateEmbeddings,
+) -> Result<()> {
+    // Create the OpenAI client.
+    let openai_config =
+        async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
+    let openai_client = async_openai::Client::with_config(openai_config);
+
+    let mut embeddings_computed = 0;
+    let batch_size: i32 = 512;
+
+    loop {
+        // Fetch item IDs which need to be embedded.
+        #[derive(diesel::Queryable, diesel::QueryableByName)]
+        struct ItemToEmbed {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            id: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            contents: String,
+        }
+        let mut items_to_embed = diesel::sql_query(
+            "
+            select id, contents from roam_item 
+            where 
+                id not in (select item_id from item_embedding)
+                and length(contents) > 0
+            limit ?;
+            ",
+        )
+        .bind::<diesel::sql_types::Integer, _>(batch_size)
+        .load::<ItemToEmbed>(conn)
+        .wrap_err("Failed to find Roam blocks that need embeddings")?;
+
+        // If there are no more items to embed, we're done.
+        if items_to_embed.is_empty() {
+            break;
+        }
+
+        for item in &items_to_embed {
+            trace!(id=%item.id, contents=%item.contents, "Embedding item");
+        }
+
+        // Embed the items.
+        let all_item_ids: Vec<&str> = items_to_embed.iter().map(|i| i.id.as_str()).collect::<_>();
+        let all_contents: Vec<&str> = items_to_embed.iter().map(|i| i.contents.as_str()).collect();
+        let all_embeddings = rtb::embeddings::embed_text_batch(&openai_client, &all_contents)
+            .await
+            .wrap_err("Failed to embed batch")?;
+
+        // Insert the embeddings into the database.
+        for i in 0..all_item_ids.len() {
+            let item_embedding = rtb::db::ItemEmbedding {
+                item_id: all_item_ids[i].to_string(),
+                embedded_text: all_contents[i].to_string(),
+                embedding: all_embeddings[i].clone(),
+            };
+
+            diesel::insert_into(schema::item_embedding::table)
+                .values(&item_embedding)
+                .execute(conn)
+                .wrap_err("Failed to insert item embedding")?;
+        }
+
+        // Update the count of embeddings computed.
+        embeddings_computed += all_item_ids.len() as u64;
+
+        info!(
+            embeddings_computed,
+            batch_size = all_item_ids.len(),
+            "Embedded batch"
+        )
+    }
 
     Ok(())
 }

@@ -1,6 +1,14 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    item_embedding (item_id) {
+        item_id -> Text,
+        embedded_text -> Text,
+        embedding -> Binary,
+    }
+}
+
+diesel::table! {
     roam_item (id) {
         id -> Text,
         parent_page_id -> Nullable<Text>,
@@ -19,9 +27,11 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(item_embedding -> roam_item (item_id));
 diesel::joinable!(roam_item -> roam_page (parent_page_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    item_embedding,
     roam_item,
     roam_page,
 );
