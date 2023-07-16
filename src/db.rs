@@ -1,5 +1,4 @@
 use crate::{roam, schema};
-use async_recursion::async_recursion;
 use diesel::prelude::*;
 use eyre::{Result, WrapErr};
 use tracing::instrument;
@@ -25,8 +24,9 @@ pub struct RoamItem {
     edit_time: Option<i64>,
 }
 
+/// Load a page into the database. Returns the number of items inserted.
 #[instrument(level="trace", skip_all, fields(title=page.title))]
-pub async fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Result<()> {
+pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Result<usize> {
     // Create a RoamPage from the roam::Page
     let db_page = RoamPage {
         title: page.title.clone(),
@@ -51,6 +51,8 @@ pub async fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) ->
         .set(&db_page)
         .execute(conn)
         .wrap_err_with(|| format!("Failed to insert page: {:?}", page.title))?;
+
+    let mut item_count = 0;
 
     // Insert its children.
     for child in &page.children {
@@ -79,19 +81,22 @@ pub async fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) ->
             .set(&db_child)
             .execute(conn)
             .wrap_err_with(|| format!("Failed to insert child: {:#?}", db_child))?;
+        item_count += 1;
 
-        insert_item_children(conn, &child)
-            .await
+        item_count += insert_item_children(conn, &child)
             .wrap_err_with(|| format!("Failed to insert child of page '{}'", page.title))?;
     }
 
-    Ok(())
+    Ok(item_count)
 }
 
-#[async_recursion]
+/// Loads an item, and all its children, into the database. Returns the number of items
+/// inserted.
 #[instrument(level = "trace", skip_all, fields(id=parent.uid, contents=parent.string))]
-async fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Result<()> {
+fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Result<usize> {
     let parent_item_id = parent.uid.clone();
+
+    let mut item_count: usize = 0;
 
     for child in &parent.children {
         // Create the child item.
@@ -121,12 +126,12 @@ async fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) 
             .set(&db_item)
             .execute(conn)
             .wrap_err_with(|| format!("Failed to insert child item: {db_item:?}"))?;
+        item_count += 1;
 
         // Insert the child item's children.
-        insert_item_children(conn, child)
-            .await
+        item_count += insert_item_children(conn, child)
             .wrap_err_with(|| format!("Failed to insert child of item '{}'", parent.uid))?;
     }
 
-    Ok(())
+    Ok(item_count)
 }

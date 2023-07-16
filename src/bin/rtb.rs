@@ -1,12 +1,13 @@
 use clap::Parser;
 use diesel::connection::SimpleConnection;
-use diesel::{Connection, SqliteConnection};
+use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use eyre::eyre;
 use eyre::{ContextCompat, Result, WrapErr};
+use rtb::roam;
 use std::path::PathBuf;
 use tokio;
-use tracing::{debug_span, info, info_span};
+use tracing::{debug_span, info, info_span, instrument};
 
 /// Embed Diesel migrations into the binary.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -62,11 +63,13 @@ async fn main() -> Result<()> {
 
     // Set pragmas.
     {
-        let _span = debug_span!("Setting database pragmas");
+        let span = debug_span!("Setting database pragmas");
+        let _guard = span.enter();
         let query = "
             pragma foreign_keys = on;
             pragma journal_mode = wal;
             pragma auto_vacuum = incremental;
+            pragma cache_size = -2000000 -- 2GB;
         ";
         db_conn
             .batch_execute(query)
@@ -75,7 +78,8 @@ async fn main() -> Result<()> {
 
     // Run any pending Diesel migrations.
     {
-        let _span = debug_span!("Running pending database migrations");
+        let span = debug_span!("Running pending database migrations");
+        let _guard = span.enter();
         db_conn
             .run_pending_migrations(MIGRATIONS)
             .map_err(|e| eyre!(e))
@@ -89,7 +93,8 @@ async fn main() -> Result<()> {
 
     // Attempt to run 'pragma optimize'
     {
-        let _span = debug_span!("Running database optimization");
+        let span = debug_span!("Running database optimization");
+        let _guard = span.enter();
         let _ = db_conn.batch_execute("pragma optimize;");
     }
 
@@ -141,28 +146,31 @@ async fn exec_import(conn: &mut SqliteConnection, args: &Import) -> Result<()> {
     info!(
         num_pages = num_pages,
         num_children = num_children,
-        "Imported Roam export"
+        "Loaded Roam export"
     );
 
     // Load the pages into the database.
-    {
-        let _span = info_span!("Import pages to database");
+    conn.transaction(|tx| -> Result<()> {
+        let span = info_span!("Load export into database");
+        let _guard = span.enter();
 
+        let mut items_inserted = 0;
         for (i, page) in export.pages.iter().enumerate() {
             // Insert the page.
-            rtb::db::insert_roam_page(conn, &page)
-                .await
+            items_inserted += rtb::db::insert_roam_page(tx, &page)
                 .wrap_err("Failed to insert page into database")?;
 
             if i % 256 == 0 {
                 info!(
-                    inserted = i,
-                    total = export.pages.len(),
-                    "Inserted page into database"
+                    new_pages = i + 1,
+                    new_items = items_inserted,
+                    total_pages = export.pages.len(),
                 );
             }
         }
-    }
+        Ok(())
+    })
+    .wrap_err("Failed to load pages to database")?;
 
     Ok(())
 }
