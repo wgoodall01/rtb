@@ -5,10 +5,10 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use eyre::{ensure, eyre};
 use eyre::{ContextCompat, Result, WrapErr};
 use hora::core::ann_index::ANNIndex;
-use rtb::{roam, schema};
+use rtb::schema;
 use std::io::Write;
 use std::path::PathBuf;
-use tokio;
+
 use tracing::{debug_span, info, info_span, instrument, trace};
 
 /// Embed Diesel migrations into the binary.
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         .db
         .to_str()
         .wrap_err("Failed to convert database path to string")?;
-    let mut db_conn = diesel::sqlite::SqliteConnection::establish(&db_path_str)
+    let mut db_conn = diesel::sqlite::SqliteConnection::establish(db_path_str)
         .wrap_err("Failed to connect to database.")?;
 
     // Set pragmas.
@@ -165,7 +165,7 @@ async fn exec_import(conn: &mut SqliteConnection, args: &Import) -> Result<()> {
         let mut items_inserted = 0;
         for (i, page) in export.pages.iter().enumerate() {
             // Insert the page.
-            items_inserted += rtb::db::insert_roam_page(tx, &page)
+            items_inserted += rtb::db::insert_roam_page(tx, page)
                 .wrap_err("Failed to insert page into database")?;
 
             if i % 256 == 0 {
@@ -212,7 +212,7 @@ async fn exec_update_embeddings(
             #[diesel(sql_type = diesel::sql_types::Text)]
             contents: String,
         }
-        let mut items_to_embed = diesel::sql_query(
+        let items_to_embed = diesel::sql_query(
             "
             select id, contents from roam_item 
             where 
@@ -339,7 +339,7 @@ async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
         .wrap_err("Failed to embed query")?;
 
     // Search the index for similar items to the query.
-    let search_results = index.search(&query_embedding.as_ref(), args.k);
+    let search_results = index.search(query_embedding.as_ref(), args.k);
 
     // Print the results.
     info!(result_count = search_results.len());
@@ -349,13 +349,12 @@ async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
 
     // Open the output file and write the results, if set:
     if let Some(output_file) = &args.output {
-        let mut output_file = std::fs::File::create(&output_file)
+        let mut output_file = std::fs::File::create(output_file)
             .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
 
-        writeln!(output_file, "Query: `{}`", args.query);
+        writeln!(output_file, "Query: `{}`", args.query).wrap_err("Failed to write to output")?;
         for result_id in search_results {
-            writeln!(output_file, "\t(({}))", result_id)
-                .wrap_err_with(|| format!("Failed to write to output file {:?}", args.output))?;
+            writeln!(output_file, "\t(({}))", result_id).wrap_err("Failed to write to output")?;
         }
     }
 

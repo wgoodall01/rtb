@@ -5,13 +5,8 @@
 use std::fmt;
 use std::str::FromStr;
 
-use diesel::{
-    backend::{Backend, RawValue},
-    deserialize, serialize, sql_types,
-    sqlite::Sqlite,
-    AsExpression, FromSqlRow, SqlType,
-};
-use eyre::{bail, eyre, Report, WrapErr};
+use diesel::{backend::Backend, deserialize, serialize, sql_types, sqlite::Sqlite};
+use eyre::{bail, Report, WrapErr};
 
 /// A Roam block identifier.
 #[derive(
@@ -72,7 +67,7 @@ impl serialize::ToSql<sql_types::Text, Sqlite> for BlockId {
 }
 
 impl deserialize::FromSql<sql_types::Text, Sqlite> for BlockId {
-    fn from_sql(raw: RawValue<Sqlite>) -> deserialize::Result<Self> {
+    fn from_sql(raw: <Sqlite as Backend>::RawValue<'_>) -> deserialize::Result<Self> {
         let id_str = <String as deserialize::FromSql<sql_types::Text, Sqlite>>::from_sql(raw)?;
         id_str.parse().map_err(Into::into)
     }

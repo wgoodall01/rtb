@@ -1,19 +1,13 @@
-use std::ops::Deref;
-
-use diesel::{
-    backend::{Backend, RawValue},
-    deserialize, serialize, sql_types,
-    sqlite::Sqlite,
-    AsExpression, FromSqlRow, SqlType,
-};
+use diesel::{backend::Backend, deserialize, serialize, sql_types, sqlite::Sqlite};
 use eyre::{eyre, Result, WrapErr};
+use ndarray::{Array, Ix1};
 use serde::{Deserialize, Serialize};
 
 #[derive(
     Debug, PartialEq, Clone, Deserialize, Serialize, diesel::AsExpression, diesel::FromSqlRow,
 )]
 #[diesel(sql_type = sql_types::Blob)]
-pub struct Embedding(Vec<f32>);
+pub struct Embedding(Array<f32, Ix1>);
 
 impl Embedding {
     pub fn from_bytes(bytes: &[u8]) -> Embedding {
@@ -38,7 +32,9 @@ impl Embedding {
 
 impl AsRef<[f32]> for Embedding {
     fn as_ref(&self) -> &[f32] {
-        &self.0
+        self.0
+            .as_slice()
+            .expect("Embedding is not contiguous in memory")
     }
 }
 
@@ -53,12 +49,9 @@ where
     }
 }
 
-impl<B: Backend> deserialize::FromSql<sql_types::Blob, B> for Embedding
-where
-    Vec<u8>: deserialize::FromSql<sql_types::Blob, B>,
-{
-    fn from_sql(bytes: RawValue<B>) -> deserialize::Result<Self> {
-        <Vec<u8> as deserialize::FromSql<sql_types::Blob, B>>::from_sql(bytes)
+impl deserialize::FromSql<sql_types::Blob, Sqlite> for Embedding {
+    fn from_sql(bytes: <Sqlite as Backend>::RawValue<'_>) -> deserialize::Result<Self> {
+        <Vec<u8> as deserialize::FromSql<sql_types::Blob, Sqlite>>::from_sql(bytes)
             .map(|vec| Embedding::from_bytes(&vec))
     }
 }
@@ -78,7 +71,7 @@ pub async fn embed_text_batch(
     // Create the embedding request.
     let request = CreateEmbeddingRequest {
         model: "text-embedding-ada-002".to_string(),
-        input: EmbeddingInput::StringArray(sources.into_iter().map(|&s| s.to_string()).collect()),
+        input: EmbeddingInput::StringArray(sources.iter().map(|&s| s.to_string()).collect()),
         user: Some("rtb".to_string()),
     };
 
@@ -94,7 +87,7 @@ pub async fn embed_text_batch(
         .data
         .into_iter()
         .map(|e| e.embedding)
-        .map(|e| Embedding(e))
+        .map(|e| Embedding(e.into()))
         .collect();
 
     Ok(embeddings)
@@ -115,7 +108,7 @@ mod tests {
 
     #[test]
     fn roundtrip_embedding_to_bytes() {
-        let embedding = Embedding(vec![1.0, 2.0, 3.0]);
+        let embedding = Embedding(ndarray::array![1.0, 2.0, 3.0]);
         let bytes = embedding.to_bytes();
         let embedding2 = Embedding::from_bytes(&bytes);
         assert_eq!(embedding, embedding2);

@@ -66,7 +66,7 @@ pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Resul
     // Insert its children.
     for child in &page.children {
         let db_child = RoamItem {
-            id: child.uid.clone(),
+            id: child.uid,
             parent_page_id: Some(page.title.clone()),
             parent_item_id: None,
             contents: child.string.clone(),
@@ -92,7 +92,7 @@ pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Resul
             .wrap_err_with(|| format!("Failed to insert child: {:#?}", db_child))?;
         item_count += 1;
 
-        item_count += insert_item_children(conn, &child)
+        item_count += insert_item_children(conn, child)
             .wrap_err_with(|| format!("Failed to insert child of page '{}'", page.title))?;
     }
 
@@ -103,16 +103,16 @@ pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Resul
 /// inserted.
 #[instrument(level = "trace", skip_all, fields(id=%parent.uid, contents=parent.string))]
 fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Result<usize> {
-    let parent_item_id = parent.uid.clone();
+    let parent_item_id = parent.uid;
 
     let mut item_count: usize = 0;
 
     for child in &parent.children {
         // Create the child item.
         let db_item = RoamItem {
-            id: child.uid.clone(),
+            id: child.uid,
             parent_page_id: None,
-            parent_item_id: Some(parent_item_id.clone()),
+            parent_item_id: Some(parent_item_id),
             contents: child.string.clone(),
             create_time: child
                 .create_time
