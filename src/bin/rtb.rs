@@ -3,13 +3,16 @@ use diesel::connection::SimpleConnection;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use eyre::{ensure, eyre};
-use eyre::{ContextCompat, Result, WrapErr};
-use hora::core::ann_index::ANNIndex;
+use eyre::{ContextCompat, Report, Result, WrapErr};
+use futures::stream::StreamExt;
+use rtb::embeddings::cosine_similarity;
+use rtb::roam;
 use rtb::schema;
+use std::collections::BinaryHeap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use tracing::{debug_span, info, info_span, instrument, trace};
+use tracing::{debug_span, info, info_span, instrument};
 
 /// Embed Diesel migrations into the binary.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -55,6 +58,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::fmt::format::FmtSpan::CLOSE
                 | tracing_subscriber::fmt::format::FmtSpan::NEW,
         )
+        .with_target(false)
         .init();
 
     // Connect to the database.
@@ -188,6 +192,10 @@ struct UpdateEmbeddings {
     /// OpenAI API key.
     #[clap(long, env = "OPENAI_API_KEY")]
     openai_api_key: String,
+
+    /// Delete all existing embeddings and re-generate.
+    #[clap(long)]
+    reset: bool,
 }
 
 #[instrument(skip_all)]
@@ -200,69 +208,97 @@ async fn exec_update_embeddings(
         async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
     let openai_client = async_openai::Client::with_config(openai_config);
 
-    let mut embeddings_computed = 0;
-    let batch_size: i32 = 512;
+    // Delete all existing embeddings if requested.
+    if args.reset {
+        let span = info_span!("Deleting existing embeddings");
+        let _guard = span.enter();
+        diesel::delete(schema::item_embedding::table)
+            .execute(conn)
+            .wrap_err("Failed to delete existing embeddings")?;
+    }
 
-    loop {
-        // Fetch item IDs which need to be embedded.
-        #[derive(diesel::Queryable, diesel::QueryableByName)]
-        struct ItemToEmbed {
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            id: String,
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            contents: String,
+    let mut embeddings_updated = 0;
+
+    let batch_size = 512;
+    let request_concurrency = 4;
+
+    // Fetch item IDs which need to be embedded.
+    #[derive(Clone, diesel::Queryable, diesel::QueryableByName)]
+    struct ItemToEmbed {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        id: roam::BlockId,
+    }
+    let ids_to_embed = diesel::sql_query(
+        "
+        select id from roam_item 
+        where 
+            id not in (select item_id from item_embedding)
+            and length(contents) > 0;
+        ",
+    )
+    .load::<ItemToEmbed>(conn)
+    .wrap_err("Failed to find Roam blocks that need embeddings")?;
+
+    // Function to embed a batch of items.
+    let process_batch = |batch: Vec<(roam::BlockId, String)>| {
+        let openai_client = openai_client.clone();
+        async move {
+            // Request embeddings from OpenAI.
+            let all_contents = batch
+                .iter()
+                .map(|(_, contents)| contents.as_str())
+                .collect::<Vec<_>>();
+            let all_ids = batch.iter().map(|(id, _)| id).collect::<Vec<_>>();
+            let all_embeddings = rtb::embeddings::embed_text_batch(&openai_client, &all_contents)
+                .await
+                .wrap_err("Failed to request embeddings for batch")?;
+
+            // Construct embedding records for each embedding in the batch.
+            let item_embeddings = all_embeddings
+                .into_iter()
+                .enumerate()
+                .map(move |(i, embedding)| rtb::db::ItemEmbedding {
+                    item_id: *all_ids[i],
+                    embedded_text: all_contents[i].to_string(),
+                    embedding: embedding.clone(),
+                })
+                .collect::<Vec<_>>();
+
+            Result::<_, Report>::Ok(item_embeddings)
         }
-        let items_to_embed = diesel::sql_query(
-            "
-            select id, contents from roam_item 
-            where 
-                id not in (select item_id from item_embedding)
-                and length(contents) > 0
-            limit ?;
-            ",
-        )
-        .bind::<diesel::sql_types::Integer, _>(batch_size)
-        .load::<ItemToEmbed>(conn)
-        .wrap_err("Failed to find Roam blocks that need embeddings")?;
+    };
 
-        // If there are no more items to embed, we're done.
-        if items_to_embed.is_empty() {
-            break;
-        }
+    let items_to_embed = ids_to_embed
+        .into_iter()
+        .map(|item| -> Result<_> {
+            let embed_contents = rtb::db::get_embeddable_text(conn, item.id)?;
+            Ok((item.id, embed_contents))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-        for item in &items_to_embed {
-            trace!(id=%item.id, contents=%item.contents, "Embedding item");
-        }
+    let mut embedded_chunks = futures::stream::iter(items_to_embed.chunks(batch_size))
+        .map(|batch| process_batch(batch.to_vec()))
+        .buffer_unordered(request_concurrency);
 
-        // Embed the items.
-        let all_item_ids: Vec<&str> = items_to_embed.iter().map(|i| i.id.as_str()).collect::<_>();
-        let all_contents: Vec<&str> = items_to_embed.iter().map(|i| i.contents.as_str()).collect();
-        let all_embeddings = rtb::embeddings::embed_text_batch(&openai_client, &all_contents)
-            .await
-            .wrap_err("Failed to embed batch")?;
-
+    // loop over stream items
+    while let Some(chunk) = embedded_chunks.next().await {
         // Insert the embeddings into the database.
-        for i in 0..all_item_ids.len() {
-            let item_embedding = rtb::db::ItemEmbedding {
-                item_id: all_item_ids[i].to_string(),
-                embedded_text: all_contents[i].to_string(),
-                embedding: all_embeddings[i].clone(),
-            };
-
+        for item_embedding in chunk? {
             diesel::insert_into(schema::item_embedding::table)
                 .values(&item_embedding)
+                .on_conflict(schema::item_embedding::item_id)
+                .do_update()
+                .set(&item_embedding)
                 .execute(conn)
                 .wrap_err("Failed to insert item embedding")?;
+            embeddings_updated += 1;
         }
 
-        // Update the count of embeddings computed.
-        embeddings_computed += all_item_ids.len() as u64;
-
         info!(
-            embeddings_computed,
-            batch_size = all_item_ids.len(),
-            "Embedded batch"
-        )
+            embeddings_updated,
+            total_to_embed = items_to_embed.len(),
+            "Updated batch"
+        );
     }
 
     Ok(())
@@ -303,48 +339,39 @@ async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
         "No item embeddings found in database"
     );
 
-    // Create a vector similarity index.
-    let mut index = {
-        let span = info_span!("Add items to similarity index");
-        let _guard = span.enter();
-        let mut index = hora::index::hnsw_idx::HNSWIndex::<f32, String>::new(
-            item_embeddings[0].embedding.dimensionality(),
-            &hora::index::hnsw_params::HNSWParams::<f32>::default(),
-        );
-        for e in &item_embeddings {
-            let vector: &[f32] = e.embedding.as_ref();
-            index
-                .add(vector, e.item_id.clone())
-                .map_err(|e| eyre!(e))
-                .wrap_err("Failed to add vector to index")?
-        }
-        index
-    };
-
-    {
-        let span = info_span!("Build similarity index");
-        let _guard = span.enter();
-        index
-            .build(hora::core::metrics::Metric::Euclidean)
-            .map_err(|e| eyre!(e))
-            .wrap_err("Failed to build similarity index")?;
-    }
-
     // Embed the query.
     let openai_config =
         async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
     let openai_client = async_openai::Client::with_config(openai_config);
-    let query_embedding = rtb::embeddings::embed_text(&openai_client, &args.query)
-        .await
-        .wrap_err("Failed to embed query")?;
+    let query_embedding = {
+        let span = info_span!("Embed query");
+        let _guard = span.enter();
+        rtb::embeddings::embed_text(&openai_client, &args.query)
+            .await
+            .wrap_err("Failed to embed query")?
+    };
 
-    // Search the index for similar items to the query.
-    let search_results = index.search(query_embedding.as_ref(), args.k);
+    // Get the K-most-similar items.
+    let k_most_similar: Vec<_> = {
+        let span = info_span!("Finding k-most-similar");
+        let _guard = span.enter();
+
+        let mut heap = BinaryHeap::new();
+        for item_embedding in item_embeddings {
+            let similarity = -cosine_similarity(&query_embedding, &item_embedding.embedding);
+            heap.push((similarity, item_embedding.item_id));
+            if heap.len() > args.k {
+                heap.pop();
+            }
+        }
+
+        heap.into_sorted_vec()
+    };
 
     // Print the results.
-    info!(result_count = search_results.len());
-    for result_id in &search_results {
-        info!(result_id);
+    info!(result_count = k_most_similar.len());
+    for (similarity, id) in &k_most_similar {
+        info!(%similarity, %id);
     }
 
     // Open the output file and write the results, if set:
@@ -353,8 +380,9 @@ async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
             .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
 
         writeln!(output_file, "Query: `{}`", args.query).wrap_err("Failed to write to output")?;
-        for result_id in search_results {
-            writeln!(output_file, "\t(({}))", result_id).wrap_err("Failed to write to output")?;
+        for (similarity, id) in k_most_similar {
+            writeln!(output_file, "\t`{similarity:0.3}` (({}))", id)
+                .wrap_err("Failed to write to output")?;
         }
     }
 

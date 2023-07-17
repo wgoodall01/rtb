@@ -1119,6 +1119,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff011a302c396a5197692431fc1948019154afc178baf7d8e37367442a4601cf"
 
 [[package]]
+name = "ordered-float"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc2dbde8f8a79f2102cc474ceb0ad68e3b80b85289ea62389b60e66777e4213"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "overload"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1399,9 +1408,11 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "eyre",
+ "futures",
  "hora",
  "memmap",
  "ndarray",
+ "ordered-float",
  "serde",
  "serde_json",
  "tokio",

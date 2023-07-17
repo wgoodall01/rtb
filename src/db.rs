@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{embeddings, roam, schema};
 use diesel::prelude::*;
 use eyre::{Result, WrapErr};
@@ -24,11 +26,11 @@ pub struct RoamItem {
     pub edit_time: Option<i64>,
 }
 
-#[derive(Queryable, Selectable, Insertable, Debug)]
+#[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = schema::item_embedding)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct ItemEmbedding {
-    pub item_id: String,
+    pub item_id: roam::BlockId,
     pub embedded_text: String,
     pub embedding: embeddings::Embedding,
 }
@@ -143,4 +145,52 @@ fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Res
     }
 
     Ok(item_count)
+}
+
+/// Get the path to an item, starting with the name of the page it's located on, and including the
+/// contents of each parent item.
+pub fn get_content_with_ancestors(
+    conn: &mut SqliteConnection,
+    item: roam::BlockId,
+) -> VecDeque<String> {
+    let mut path = VecDeque::new();
+
+    let mut current = item;
+    loop {
+        // Get the item from the database.
+        let db_item = schema::roam_item::table
+            .find(current)
+            .first::<RoamItem>(conn)
+            .expect("Failed to get item from database");
+
+        // Prepend its contents.
+        path.push_front(db_item.contents);
+
+        match (db_item.parent_item_id, db_item.parent_page_id) {
+            (Some(it_id), None) => current = it_id,
+            (None, Some(page_id)) => {
+                // Prepend the page name.
+                path.push_front(page_id);
+                return path;
+            }
+            (None, None) | (Some(_), Some(_)) => unreachable!(),
+        }
+    }
+}
+
+/// Format the ready-to-embed text for an item.
+///
+/// This will include the item's contents, and the contents of its parent items and page.
+pub fn get_embeddable_text(conn: &mut SqliteConnection, item: roam::BlockId) -> Result<String> {
+    let mut text = String::new();
+
+    // Push each path item with successive indentation.
+    let path = get_content_with_ancestors(conn, item);
+    for (i, item) in path.into_iter().enumerate() {
+        text.push_str(&item);
+        text.push_str("\n");
+        text.push_str(&"\t".repeat(i))
+    }
+
+    Ok(text)
 }

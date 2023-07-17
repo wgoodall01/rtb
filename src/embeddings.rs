@@ -1,6 +1,7 @@
 use diesel::{backend::Backend, deserialize, serialize, sql_types, sqlite::Sqlite};
 use eyre::{eyre, Result, WrapErr};
 use ndarray::{Array, Ix1};
+use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
 
 #[derive(
@@ -100,6 +101,20 @@ pub async fn embed_text(
 ) -> Result<Embedding> {
     let embeddings = embed_text_batch(openai, &[source]).await?;
     Ok(embeddings.into_iter().next().unwrap())
+}
+
+/// Compute the cosine similarity between two embeddings.
+pub fn cosine_similarity(a: &Embedding, b: &Embedding) -> NotNan<f32> {
+    let a: &Array<f32, Ix1> = &a.0;
+    let b: &Array<f32, Ix1> = &b.0;
+
+    let norm_a = a.dot(a).sqrt();
+    let norm_b = b.dot(b).sqrt();
+
+    let similarity = a.dot(b) / (norm_a * norm_b);
+    similarity
+        .try_into()
+        .expect("Cosine similarity should not be NaN")
 }
 
 #[cfg(test)]
