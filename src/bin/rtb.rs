@@ -2,9 +2,11 @@ use clap::Parser;
 use diesel::connection::SimpleConnection;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use eyre::eyre;
+use eyre::{ensure, eyre};
 use eyre::{ContextCompat, Result, WrapErr};
+use hora::core::ann_index::ANNIndex;
 use rtb::{roam, schema};
+use std::io::Write;
 use std::path::PathBuf;
 use tokio;
 use tracing::{debug_span, info, info_span, instrument, trace};
@@ -30,6 +32,7 @@ struct Args {
 enum Subcommand {
     Import(Import),
     UpdateEmbeddings(UpdateEmbeddings),
+    Search(Search),
 }
 
 #[tokio::main]
@@ -93,6 +96,7 @@ async fn main() -> Result<()> {
         Subcommand::UpdateEmbeddings(update_embeddings) => {
             exec_update_embeddings(&mut db_conn, &update_embeddings).await
         }
+        Subcommand::Search(search) => exec_search(&mut db_conn, &search).await,
     };
 
     // Attempt to run 'pragma optimize'
@@ -259,6 +263,100 @@ async fn exec_update_embeddings(
             batch_size = all_item_ids.len(),
             "Embedded batch"
         )
+    }
+
+    Ok(())
+}
+
+#[derive(clap::Parser)]
+struct Search {
+    /// OpenAI API key.
+    #[clap(long, env = "OPENAI_API_KEY")]
+    openai_api_key: String,
+
+    /// Return the top K results.
+    #[clap(short, default_value("64"))]
+    k: usize,
+
+    /// The text to search for.
+    query: String,
+
+    /// Write output, formatted as a Roam bulleted list, to this file.
+    #[clap(long, short('o'))]
+    output: Option<PathBuf>,
+}
+
+#[instrument(skip_all)]
+async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
+    // Load all the item embeddings.
+    let item_embeddings = {
+        let span = info_span!("Load item embeddings");
+        let _guard = span.enter();
+
+        schema::item_embedding::table
+            .load::<rtb::db::ItemEmbedding>(conn)
+            .wrap_err("Failed to load all item embeddings")?
+    };
+
+    ensure!(
+        !item_embeddings.is_empty(),
+        "No item embeddings found in database"
+    );
+
+    // Create a vector similarity index.
+    let mut index = {
+        let span = info_span!("Add items to similarity index");
+        let _guard = span.enter();
+        let mut index = hora::index::hnsw_idx::HNSWIndex::<f32, String>::new(
+            item_embeddings[0].embedding.dimensionality(),
+            &hora::index::hnsw_params::HNSWParams::<f32>::default(),
+        );
+        for e in &item_embeddings {
+            let vector: &[f32] = e.embedding.as_ref();
+            index
+                .add(vector, e.item_id.clone())
+                .map_err(|e| eyre!(e))
+                .wrap_err("Failed to add vector to index")?
+        }
+        index
+    };
+
+    {
+        let span = info_span!("Build similarity index");
+        let _guard = span.enter();
+        index
+            .build(hora::core::metrics::Metric::Euclidean)
+            .map_err(|e| eyre!(e))
+            .wrap_err("Failed to build similarity index")?;
+    }
+
+    // Embed the query.
+    let openai_config =
+        async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
+    let openai_client = async_openai::Client::with_config(openai_config);
+    let query_embedding = rtb::embeddings::embed_text(&openai_client, &args.query)
+        .await
+        .wrap_err("Failed to embed query")?;
+
+    // Search the index for similar items to the query.
+    let search_results = index.search(&query_embedding.as_ref(), args.k);
+
+    // Print the results.
+    info!(result_count = search_results.len());
+    for result_id in &search_results {
+        info!(result_id);
+    }
+
+    // Open the output file and write the results, if set:
+    if let Some(output_file) = &args.output {
+        let mut output_file = std::fs::File::create(&output_file)
+            .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
+
+        writeln!(output_file, "Query: `{}`", args.query);
+        for result_id in search_results {
+            writeln!(output_file, "\t(({}))", result_id)
+                .wrap_err_with(|| format!("Failed to write to output file {:?}", args.output))?;
+        }
     }
 
     Ok(())

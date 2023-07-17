@@ -16,9 +16,9 @@ pub struct RoamPage {
 #[diesel(table_name = schema::roam_item)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct RoamItem {
-    pub id: String,
+    pub id: roam::BlockId,
     pub parent_page_id: Option<String>,
-    pub parent_item_id: Option<String>,
+    pub parent_item_id: Option<roam::BlockId>,
     pub contents: String,
     pub create_time: Option<i64>,
     pub edit_time: Option<i64>,
@@ -101,7 +101,7 @@ pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Resul
 
 /// Loads an item, and all its children, into the database. Returns the number of items
 /// inserted.
-#[instrument(level = "trace", skip_all, fields(id=parent.uid, contents=parent.string))]
+#[instrument(level = "trace", skip_all, fields(id=%parent.uid, contents=parent.string))]
 fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Result<usize> {
     let parent_item_id = parent.uid.clone();
 

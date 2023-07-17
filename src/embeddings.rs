@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use diesel::{
     backend::{Backend, RawValue},
     deserialize, serialize, sql_types,
@@ -27,6 +29,16 @@ impl Embedding {
             .iter()
             .flat_map(|f| f.to_le_bytes().into_iter())
             .collect()
+    }
+
+    pub fn dimensionality(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl AsRef<[f32]> for Embedding {
+    fn as_ref(&self) -> &[f32] {
+        &self.0
     }
 }
 
@@ -86,6 +98,15 @@ pub async fn embed_text_batch(
         .collect();
 
     Ok(embeddings)
+}
+
+/// Compute a single embedding.
+pub async fn embed_text(
+    openai: &async_openai::Client<async_openai::config::OpenAIConfig>,
+    source: &str,
+) -> Result<Embedding> {
+    let embeddings = embed_text_batch(openai, &[source]).await?;
+    Ok(embeddings.into_iter().next().unwrap())
 }
 
 #[cfg(test)]

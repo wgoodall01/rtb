@@ -10,6 +10,7 @@ clap = { version = "4.3.12", features = ["derive", "env"] }
 diesel = { version = "2.1.0", features = ["sqlite", "serde_json"] }
 diesel_migrations = { version = "2.1.0", features = ["sqlite"] }
 eyre = "0.6.8"
+hora = { version = "0.1.1", features = ["packed_simd", "simd"] }
 memmap = "0.7.0"
 serde = { version = "1.0.171", features = ["derive"] }
 serde_json = "1.0.103"
