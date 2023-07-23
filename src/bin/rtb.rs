@@ -77,7 +77,9 @@ async fn main() -> Result<()> {
             pragma foreign_keys = on;
             pragma journal_mode = wal;
             pragma auto_vacuum = incremental;
-            pragma cache_size = -2000000 -- 2GB;
+            pragma temp_store = memory;
+            pragma cache_size = -2000000; -- 2GB
+            pragma mmap_size = 2000000;   -- 2GB
         ";
         db_conn
             .batch_execute(query)
