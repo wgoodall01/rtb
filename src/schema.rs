@@ -13,6 +13,7 @@ diesel::table! {
         id -> Text,
         parent_page_id -> Nullable<Text>,
         parent_item_id -> Nullable<Text>,
+        order_in_parent -> Integer,
         contents -> Text,
         create_time -> Nullable<BigInt>,
         edit_time -> Nullable<BigInt>,

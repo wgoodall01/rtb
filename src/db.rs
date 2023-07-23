@@ -5,6 +5,9 @@ use diesel::prelude::*;
 use eyre::{Result, WrapErr};
 use tracing::instrument;
 
+/// If a block references this page, that block and its children will not be imported.
+pub const EXCLUDE_PAGE: &str = "Roam Third Brain/Exclude";
+
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = schema::roam_page)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -14,6 +17,27 @@ pub struct RoamPage {
     pub edit_time: i64,
 }
 
+impl RoamPage {
+    fn try_from_roam_json(page: &roam::Page) -> Result<RoamPage> {
+        let db_page = RoamPage {
+            title: page.title.clone(),
+            edit_time: page
+                .edit_time
+                .try_into()
+                .wrap_err("Failed to convert edit time to i64")?,
+            create_time: page
+                .create_time
+                .map(|i| {
+                    i.try_into()
+                        .wrap_err("Failed to convert create time to i64")
+                })
+                .transpose()?,
+        };
+
+        Ok(db_page)
+    }
+}
+
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = schema::roam_item)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -21,9 +45,70 @@ pub struct RoamItem {
     pub id: roam::BlockId,
     pub parent_page_id: Option<String>,
     pub parent_item_id: Option<roam::BlockId>,
+    pub order_in_parent: i32,
     pub contents: String,
     pub create_time: Option<i64>,
     pub edit_time: Option<i64>,
+}
+
+impl RoamItem {
+    pub fn try_from_roam_json_root(
+        page_title: &str,
+        item: &roam::Item,
+        order: u64,
+    ) -> Result<RoamItem> {
+        let db_item = RoamItem {
+            id: item.uid,
+            parent_page_id: Some(page_title.to_owned()),
+            parent_item_id: None,
+            order_in_parent: order
+                .try_into()
+                .wrap_err("Order out of range for db integer")?,
+            contents: item.string.clone(),
+            create_time: item
+                .create_time
+                .map(|i| {
+                    i.try_into()
+                        .wrap_err("Failed to convert create time to i64")
+                })
+                .transpose()?,
+            edit_time: item
+                .edit_time
+                .map(|i| i.try_into().wrap_err("Failed to convert edit time to i64"))
+                .transpose()?,
+        };
+
+        Ok(db_item)
+    }
+
+    pub fn try_from_roam_json_child(
+        parent_id: roam::BlockId,
+        item: &roam::Item,
+        order: u64,
+    ) -> Result<RoamItem> {
+        let db_item = RoamItem {
+            id: item.uid,
+            parent_page_id: None,
+            parent_item_id: Some(parent_id),
+            order_in_parent: order
+                .try_into()
+                .wrap_err("Order out of range for db integer")?,
+            contents: item.string.clone(),
+            create_time: item
+                .create_time
+                .map(|i| {
+                    i.try_into()
+                        .wrap_err("Failed to convert create time to i64")
+                })
+                .transpose()?,
+            edit_time: item
+                .edit_time
+                .map(|i| i.try_into().wrap_err("Failed to convert edit time to i64"))
+                .transpose()?,
+        };
+
+        Ok(db_item)
+    }
 }
 
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
@@ -35,24 +120,31 @@ pub struct ItemEmbedding {
     pub embedding: embeddings::Embedding,
 }
 
+/// Whether or not this item and its children should be excluded.
+fn should_exclude_subtree(item: &roam::Item) -> bool {
+    item.string.contains(&format!("[[{EXCLUDE_PAGE}]]"))
+}
+
+/// Delete an item, and the subtree it defines, from the database.
+fn delete_item_and_subtree(conn: &mut SqliteConnection, item_id: &roam::BlockId) -> Result<()> {
+    diesel::sql_query(
+        r"
+        -- Rely on the foreign key constraint to delete the item's children.
+        delete from roam_item where id = ?;
+        ",
+    )
+    .bind::<diesel::sql_types::Text, _>(item_id.to_string())
+    .execute(conn)
+    .wrap_err("Failed to delete children")?;
+
+    Ok(())
+}
+
 /// Load a page into the database. Returns the number of items inserted.
 #[instrument(level="trace", skip_all, fields(title=page.title))]
 pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Result<usize> {
     // Create a RoamPage from the roam::Page
-    let db_page = RoamPage {
-        title: page.title.clone(),
-        edit_time: page
-            .edit_time
-            .try_into()
-            .wrap_err("Failed to convert edit time to i64")?,
-        create_time: page
-            .create_time
-            .map(|i| {
-                i.try_into()
-                    .wrap_err("Failed to convert create time to i64")
-            })
-            .transpose()?,
-    };
+    let db_page = RoamPage::try_from_roam_json(page)?;
 
     // Insert the RoamPage
     diesel::insert_into(schema::roam_page::table)
@@ -66,24 +158,17 @@ pub fn insert_roam_page(conn: &mut SqliteConnection, page: &roam::Page) -> Resul
     let mut item_count = 0;
 
     // Insert its children.
-    for child in &page.children {
-        let db_child = RoamItem {
-            id: child.uid,
-            parent_page_id: Some(page.title.clone()),
-            parent_item_id: None,
-            contents: child.string.clone(),
-            create_time: child
-                .create_time
-                .map(|i| {
-                    i.try_into()
-                        .wrap_err("Failed to convert create time to i64")
-                })
-                .transpose()?,
-            edit_time: child
-                .edit_time
-                .map(|i| i.try_into().wrap_err("Failed to convert edit time to i64"))
-                .transpose()?,
-        };
+    for (i, child) in page.children.iter().enumerate() {
+        if should_exclude_subtree(child) {
+            delete_item_and_subtree(conn, &child.uid).context("Failed to delete excluded item")?;
+            continue;
+        }
+
+        let db_child = RoamItem::try_from_roam_json_root(
+            &page.title,
+            child,
+            i.try_into().wrap_err("Child index out of range")?,
+        )?;
 
         diesel::insert_into(schema::roam_item::table)
             .values(&db_child)
@@ -109,25 +194,18 @@ fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Res
 
     let mut item_count: usize = 0;
 
-    for child in &parent.children {
+    for (i, child) in parent.children.iter().enumerate() {
+        if should_exclude_subtree(child) {
+            delete_item_and_subtree(conn, &child.uid).context("Failed to delete excluded item")?;
+            continue;
+        }
+
         // Create the child item.
-        let db_item = RoamItem {
-            id: child.uid,
-            parent_page_id: None,
-            parent_item_id: Some(parent_item_id),
-            contents: child.string.clone(),
-            create_time: child
-                .create_time
-                .map(|i| {
-                    i.try_into()
-                        .wrap_err("Failed to convert create time to i64")
-                })
-                .transpose()?,
-            edit_time: child
-                .edit_time
-                .map(|i| i.try_into().wrap_err("Failed to convert edit time to i64"))
-                .transpose()?,
-        };
+        let db_item = RoamItem::try_from_roam_json_child(
+            parent_item_id,
+            child,
+            i.try_into().wrap_err("Child index out of range")?,
+        )?;
 
         // Insert the child item, updating all columns on conflict.
         diesel::insert_into(schema::roam_item::table)
@@ -152,7 +230,7 @@ fn insert_item_children(conn: &mut SqliteConnection, parent: &roam::Item) -> Res
 pub fn get_content_with_ancestors(
     conn: &mut SqliteConnection,
     item: roam::BlockId,
-) -> VecDeque<String> {
+) -> (String, VecDeque<String>) {
     let mut path = VecDeque::new();
 
     let mut current = item;
@@ -169,9 +247,8 @@ pub fn get_content_with_ancestors(
         match (db_item.parent_item_id, db_item.parent_page_id) {
             (Some(it_id), None) => current = it_id,
             (None, Some(page_id)) => {
-                // Prepend the page name.
-                path.push_front(page_id);
-                return path;
+                // Return the page name separately.
+                return (page_id, path);
             }
             (None, None) | (Some(_), Some(_)) => unreachable!(),
         }
@@ -184,12 +261,16 @@ pub fn get_content_with_ancestors(
 pub fn get_embeddable_text(conn: &mut SqliteConnection, item: roam::BlockId) -> Result<String> {
     let mut text = String::new();
 
+    let (title, path) = get_content_with_ancestors(conn, item);
+    // Push the page title.
+    text.push_str(&format!("# {title}\n\n"));
+
     // Push each path item with successive indentation.
-    let path = get_content_with_ancestors(conn, item);
     for (i, item) in path.into_iter().enumerate() {
+        text.push_str(&"\t".repeat(i));
+        text.push_str(" - ");
         text.push_str(&item);
         text.push_str("\n");
-        text.push_str(&"\t".repeat(i))
     }
 
     Ok(text)

@@ -2,12 +2,12 @@ use clap::Parser;
 use diesel::connection::SimpleConnection;
 use diesel::{Connection, RunQueryDsl, SqliteConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use eyre::{ensure, eyre};
+use eyre::eyre;
 use eyre::{ContextCompat, Report, Result, WrapErr};
 use futures::stream::StreamExt;
-use rtb::embeddings::cosine_similarity;
-use rtb::roam;
-use rtb::schema;
+use rtb::result_forest::ResultForest;
+use rtb::{prompting, schema};
+use rtb::{roam, search};
 use std::collections::BinaryHeap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -36,6 +36,7 @@ enum Subcommand {
     Import(Import),
     UpdateEmbeddings(UpdateEmbeddings),
     Search(Search),
+    Answer(Answer),
 }
 
 #[tokio::main]
@@ -103,6 +104,7 @@ async fn main() -> Result<()> {
             exec_update_embeddings(&mut db_conn, &update_embeddings).await
         }
         Subcommand::Search(search) => exec_search(&mut db_conn, &search).await,
+        Subcommand::Answer(answer) => exec_answer(&mut db_conn, &answer).await,
     };
 
     // Attempt to run 'pragma optimize'
@@ -313,34 +315,19 @@ struct Search {
     openai_api_key: String,
 
     /// Return the top K results.
-    #[clap(short, default_value("64"))]
+    #[clap(short, default_value("32"))]
     k: usize,
 
     /// The text to search for.
     query: String,
 
     /// Write output, formatted as a Roam bulleted list, to this file.
-    #[clap(long, short('o'))]
-    output: Option<PathBuf>,
+    #[clap(long, short('o'), default_value("/dev/stdout"))]
+    output: PathBuf,
 }
 
 #[instrument(skip_all)]
 async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
-    // Load all the item embeddings.
-    let item_embeddings = {
-        let span = info_span!("Load item embeddings");
-        let _guard = span.enter();
-
-        schema::item_embedding::table
-            .load::<rtb::db::ItemEmbedding>(conn)
-            .wrap_err("Failed to load all item embeddings")?
-    };
-
-    ensure!(
-        !item_embeddings.is_empty(),
-        "No item embeddings found in database"
-    );
-
     // Embed the query.
     let openai_config =
         async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
@@ -353,40 +340,104 @@ async fn exec_search(conn: &mut SqliteConnection, args: &Search) -> Result<()> {
             .wrap_err("Failed to embed query")?
     };
 
-    // Get the K-most-similar items.
-    let k_most_similar: Vec<_> = {
-        let span = info_span!("Finding k-most-similar");
-        let _guard = span.enter();
+    // Perform the similarity search.
+    let k_most_similar: Vec<(search::Distance, roam::BlockId)> =
+        search::SimilaritySearch::new(query_embedding)
+            .with_top_k(args.k)
+            .with_distance_metric(search::cosine_distance)
+            .execute(conn)
+            .await
+            .wrap_err("Failed to execute similarity search")?;
 
-        let mut heap = BinaryHeap::new();
-        for item_embedding in item_embeddings {
-            let similarity = -cosine_similarity(&query_embedding, &item_embedding.embedding);
-            heap.push((similarity, item_embedding.item_id));
-            if heap.len() > args.k {
-                heap.pop();
-            }
-        }
-
-        heap.into_sorted_vec()
-    };
-
-    // Print the results.
-    info!(result_count = k_most_similar.len());
-    for (similarity, id) in &k_most_similar {
-        info!(%similarity, %id);
+    // Collect results into a result forest.
+    let mut result_forest = ResultForest::new();
+    for (distance, item_id) in &k_most_similar {
+        result_forest
+            .add_item(conn, *item_id, *distance)
+            .wrap_err_with(|| format!("Failed to add item to result forest: {}", item_id))?;
     }
 
     // Open the output file and write the results, if set:
-    if let Some(output_file) = &args.output {
-        let mut output_file = std::fs::File::create(output_file)
-            .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
-
-        writeln!(output_file, "Query: `{}`", args.query).wrap_err("Failed to write to output")?;
-        for (similarity, id) in k_most_similar {
-            writeln!(output_file, "\t`{similarity:0.3}` (({}))", id)
-                .wrap_err("Failed to write to output")?;
-        }
+    let mut output_file = std::fs::File::create(&args.output)
+        .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
+    writeln!(output_file, "Query: `{}`", args.query)?;
+    for subset_page in result_forest
+        .get_subset_page_list(conn)
+        .wrap_err("Failed to format result forest")?
+    {
+        writeln!(output_file, "{}", subset_page.to_roam_text(1))?;
     }
+
+    Ok(())
+}
+
+#[derive(clap::Parser)]
+struct Answer {
+    /// OpenAI API key.
+    #[clap(long, env = "OPENAI_API_KEY")]
+    openai_api_key: String,
+
+    /// Use the top N results to inform the answer.
+    #[clap(short, default_value("16"))]
+    n_results: usize,
+
+    /// Use the top N pages to inform the answer.
+    #[clap(short, default_value("8"))]
+    n_pages: usize,
+
+    /// Write output, formatted as Roam markdown, to this file.
+    #[clap(long, short('o'), default_value("/dev/stdout"))]
+    output: PathBuf,
+
+    /// The text to search for.
+    query: String,
+}
+
+#[instrument(skip_all)]
+async fn exec_answer(conn: &mut SqliteConnection, args: &Answer) -> Result<()> {
+    // Embed the query.
+    let openai_config =
+        async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
+    let openai_client = async_openai::Client::with_config(openai_config);
+    let query_embedding = {
+        let span = info_span!("Embed query");
+        let _guard = span.enter();
+        rtb::embeddings::embed_text(&openai_client, &args.query)
+            .await
+            .wrap_err("Failed to embed query")?
+    };
+
+    // Perform the similarity search.
+    let k_most_similar: Vec<(search::Distance, roam::BlockId)> =
+        search::SimilaritySearch::new(query_embedding)
+            .with_top_k(args.n_results)
+            .with_distance_metric(search::cosine_distance)
+            .execute(conn)
+            .await
+            .wrap_err("Failed to execute similarity search")?;
+
+    // Create a result forest from the search results.
+    let mut result_forest = ResultForest::new();
+    for (distance, item_id) in k_most_similar {
+        result_forest
+            .add_item(conn, item_id, distance)
+            .wrap_err("Failed to add item to result forest")?;
+    }
+
+    // Generate the answer.
+    let answer = {
+        let span = info_span!("Generating response");
+        let _guard = span.enter();
+        rtb::prompting::generate_answer(conn, &openai_client, &result_forest, &args.query)
+            .await
+            .wrap_err("Failed to generate response.")?
+    };
+
+    // Write the answer to the output file.
+    let mut output_file = std::fs::File::create(&args.output)
+        .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
+    writeln!(output_file, "Query: `{}` #GPT", args.query)?;
+    writeln!(output_file, "{}", answer)?;
 
     Ok(())
 }
