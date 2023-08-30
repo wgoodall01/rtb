@@ -1,7 +1,7 @@
 use async_openai::types::Role;
-use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SqliteConnection};
+use diesel::{QueryDsl, RunQueryDsl, SqliteConnection};
 use eyre::{ContextCompat, Result, WrapErr};
-use indoc::{formatdoc, indoc};
+use indoc::formatdoc;
 
 use crate::{
     db,
@@ -19,7 +19,7 @@ pub async fn generate_answer(
     let mut prompt: Vec<(Role, String)> = vec![];
 
     prompt.push((
-        Role::System, 
+        Role::System,
         formatdoc! {"
             You are a helpful question-answering system named QAS. Your goal is to answer a factual question based on the content of a large database of notes, along with your personal knowledge.
 
@@ -118,7 +118,7 @@ pub async fn format_result_page(
 
     // Add the page's subset children.
     for child in &results.children {
-        out.push_str("\n");
+        out.push('\n');
         format_result_item(out, conn, child, 0)?;
     }
 
@@ -143,7 +143,7 @@ pub fn format_result_item(
 
     // Add the item's subset children.
     for child in &item.children {
-        out.push_str("\n");
+        out.push('\n');
         format_result_item(out, conn, child, indent + 1)?;
     }
 

@@ -81,11 +81,7 @@ impl ResultForest {
     /// Return the subsetted result list, in order of similarity.
     pub fn get_subset_page_list(&self, conn: &mut SqliteConnection) -> Result<Vec<SubsetPage>> {
         // Get a list of pages, sorted in order of increasing distance.
-        let mut pages = self
-            .pages
-            .values()
-            .map(|page| page.clone())
-            .collect::<Vec<_>>();
+        let mut pages = self.pages.values().collect::<Vec<_>>();
         pages.sort_by_key(|page| page.min_distance);
 
         // Get the subset for each page.
@@ -95,6 +91,12 @@ impl ResultForest {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(subset_pages)
+    }
+}
+
+impl Default for ResultForest {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -171,7 +173,7 @@ impl SubsetPage {
 
         // Add the page's children.
         for child in &self.children {
-            text.push_str("\n");
+            text.push('\n');
             text.push_str(&child.to_roam_text(indent + 1));
         }
 
@@ -196,7 +198,7 @@ impl SubsetItem {
 
         // Add the item's children.
         for child in &self.children {
-            text.push_str("\n");
+            text.push('\n');
             text.push_str(&child.to_roam_text(indent + 1));
         }
 

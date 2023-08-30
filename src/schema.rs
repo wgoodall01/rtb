@@ -31,8 +31,4 @@ diesel::table! {
 diesel::joinable!(item_embedding -> roam_item (item_id));
 diesel::joinable!(roam_item -> roam_page (parent_page_id));
 
-diesel::allow_tables_to_appear_in_same_query!(
-    item_embedding,
-    roam_item,
-    roam_page,
-);
+diesel::allow_tables_to_appear_in_same_query!(item_embedding, roam_item, roam_page,);

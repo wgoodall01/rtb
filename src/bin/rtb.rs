@@ -6,9 +6,9 @@ use eyre::eyre;
 use eyre::{ContextCompat, Report, Result, WrapErr};
 use futures::stream::StreamExt;
 use rtb::result_forest::ResultForest;
-use rtb::{prompting, schema};
+use rtb::schema;
 use rtb::{roam, search};
-use std::collections::BinaryHeap;
+
 use std::io::Write;
 use std::path::PathBuf;
 

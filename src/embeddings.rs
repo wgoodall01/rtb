@@ -1,7 +1,7 @@
 use diesel::{backend::Backend, deserialize, serialize, sql_types, sqlite::Sqlite};
 use eyre::{eyre, Result, WrapErr};
 use ndarray::{Array, ArrayView, Ix1};
-use ordered_float::NotNan;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(

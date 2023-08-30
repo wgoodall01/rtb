@@ -270,7 +270,7 @@ pub fn get_embeddable_text(conn: &mut SqliteConnection, item: roam::BlockId) -> 
         text.push_str(&"\t".repeat(i));
         text.push_str(" - ");
         text.push_str(&item);
-        text.push_str("\n");
+        text.push('\n');
     }
 
     Ok(text)

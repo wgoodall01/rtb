@@ -2,7 +2,7 @@ use std::collections::BinaryHeap;
 
 use diesel::{RunQueryDsl, SqliteConnection};
 use eyre::{bail, ensure, Context, Result};
-use ndarray::{Array, ArrayView, Ix1};
+use ndarray::{ArrayView, Ix1};
 use ordered_float::NotNan;
 use tracing::{info_span, instrument};
 
