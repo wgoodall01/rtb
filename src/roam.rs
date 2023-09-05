@@ -10,16 +10,7 @@ use eyre::{bail, Report, WrapErr};
 
 /// A Roam block identifier.
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    PartialEq,
-    Hash,
-    PartialOrd,
-    Ord,
-    diesel::AsExpression,
-    diesel::FromSqlRow,
+    Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, diesel::AsExpression, diesel::FromSqlRow,
 )]
 #[diesel(sql_type = sql_types::Text)]
 pub struct BlockId([u8; 9]);
@@ -56,6 +47,12 @@ impl AsRef<str> for BlockId {
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_ref())
+    }
+}
+
+impl fmt::Debug for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <str as fmt::Debug>::fmt(self.as_ref(), f)
     }
 }
 

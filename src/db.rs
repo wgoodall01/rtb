@@ -11,6 +11,7 @@ pub const EXCLUDE_PAGE: &str = "Roam Third Brain/Exclude";
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = schema::roam_page)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(treat_none_as_null = true)]
 pub struct RoamPage {
     pub title: String,
     pub create_time: Option<i64>,
@@ -41,6 +42,7 @@ impl RoamPage {
 #[derive(Queryable, Selectable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = schema::roam_item)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(treat_none_as_null = true)]
 pub struct RoamItem {
     pub id: roam::BlockId,
     pub parent_page_id: Option<String>,
