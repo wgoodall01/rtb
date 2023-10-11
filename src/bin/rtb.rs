@@ -381,10 +381,6 @@ struct Answer {
     #[clap(short, default_value("16"))]
     n_results: usize,
 
-    /// Use the top N pages to inform the answer.
-    #[clap(short, default_value("8"))]
-    n_pages: usize,
-
     /// Write output, formatted as Roam markdown, to this file.
     #[clap(long, short('o'), default_value("/dev/stdout"))]
     output: PathBuf,

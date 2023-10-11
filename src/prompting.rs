@@ -55,9 +55,21 @@ pub async fn generate_answer(
         "Here's the question again, for your reference:".to_string(),
     ));
     prompt.push((Role::User, question.to_string()));
-    prompt.push((Role::System, formatdoc!{"
-        Answer the question below in RoamResearch Markdown format. If you reference the notes, use a Markdown link to reference individual bullet points by their Block ID, or to reference pages by their title. Be concise in your answer.
-    "}));
+    prompt.push((
+        Role::System,
+        formatdoc! {"
+        Answer the question below in RoamResearch Markdown format:
+
+        - To add a footnote referencing a BlockId: [¹](((BlockId)))
+        - To link text to a BlockId: [some inline text](((BlockId)))
+        - To link to a page by its title: [[Page Title]]
+        - To link text to a page: [some inline text]([[Page Title]])
+
+        Only make links to a [[Page Title]] or to a ((BlockId)). Do not link to anything else.
+        
+        Be concise in your answer.
+    "},
+    ));
 
     // Build the OpenAI request.
     let chat_completion_request = async_openai::types::CreateChatCompletionRequest {
