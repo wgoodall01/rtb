@@ -28,11 +28,11 @@ pub async fn generate_answer(
             To help you answer questions, we've put a link to each page at the top of the page, and a link to each block at the end of each bullet point. Remember these IDs, as you'll be asked to cite them in your answer. Here's an example of the format you should expect:
 
             ```
-            [[First Topic]]
+            [[Page Title 1]]
             - This is text in a root-level bullet point.[*](((BlockId1))) 
-                - This is text, referencing the [[Second Topic]], in a child-level bullet point.[*](((BlockId2)))
-                    - This is [a link]([[Third Topic]]) in a child-level bullet point.[*](((BlockId2)))
-            [[Second Topic]]
+                - This is text, referencing the [[Page Title 2]], in a child-level bullet point.[*](((BlockId2)))
+                    - This is [a link]([[Page Title 3]]) in a child-level bullet point.[*](((BlockId2)))
+            [[Page Title 2]]
             - This is some more text in a root-level bullet point.[*](((BlockId3))) 
             ```
 
