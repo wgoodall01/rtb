@@ -188,6 +188,18 @@ async fn exec_import(conn: &mut SqliteConnection, args: &Import) -> Result<()> {
     })
     .wrap_err("Failed to load pages to database")?;
 
+    // Delete any embeddings with no matching item.
+    {
+        let span = info_span!("Delete orphaned embeddings");
+        let _guard = span.enter();
+        let num_deleted = diesel::sql_query(
+            "delete from item_embedding where not exists (select * from roam_item ri where ri.id = item_embedding.item_id);",
+        )
+        .execute(conn)
+        .wrap_err("Failed to delete orphaned embeddings")?;
+        info!(num_deleted, "Deleted orphaned embeddings");
+    }
+
     Ok(())
 }
 
@@ -210,7 +222,8 @@ async fn exec_update_embeddings(
     // Create the OpenAI client.
     let openai_config =
         async_openai::config::OpenAIConfig::new().with_api_key(&args.openai_api_key);
-    let openai_client = async_openai::Client::with_config(openai_config);
+    let openai_client = async_openai::Client::with_config(openai_config)
+        .with_backoff(backoff::ExponentialBackoff::default());
 
     // Delete all existing embeddings if requested.
     if args.reset {
@@ -378,7 +391,7 @@ struct Answer {
     openai_api_key: String,
 
     /// Use the top N results to inform the answer.
-    #[clap(short, default_value("16"))]
+    #[clap(short, default_value("512"))]
     n_results: usize,
 
     /// Write output, formatted as Roam markdown, to this file.

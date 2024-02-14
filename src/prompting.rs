@@ -9,6 +9,9 @@ use crate::{
     schema,
 };
 
+/// What model to use for question answering?
+pub const CHAT_MODEL: &str = "gpt-4-1106-preview";
+
 /// Generate an answer to a textual question.
 pub async fn generate_answer(
     conn: &mut SqliteConnection,
@@ -29,11 +32,11 @@ pub async fn generate_answer(
 
             ```
             [[Page Title 1]]
-            - This is text in a root-level bullet point.[*](((BlockId1))) 
+            - This is text in a root-level bullet point.[¹](((BlockId1))) 
                 - This is text, referencing the [[Page Title 2]], in a child-level bullet point.[*](((BlockId2)))
-                    - This is [a link]([[Page Title 3]]) in a child-level bullet point.[*](((BlockId2)))
+                    - This is [a link]([[Page Title 3]]) in a child-level bullet point.[²](((BlockId2)))
             [[Page Title 2]]
-            - This is some more text in a root-level bullet point.[*](((BlockId3))) 
+            - This is some more text in a root-level bullet point.[³](((BlockId3))) 
             ```
 
             This is the question you'll be answering: 
@@ -73,7 +76,7 @@ pub async fn generate_answer(
 
     // Build the OpenAI request.
     let chat_completion_request = async_openai::types::CreateChatCompletionRequest {
-        model: "gpt-4".to_string(),
+        model: CHAT_MODEL.to_string(),
         messages: prompt
             .into_iter()
             .map(
