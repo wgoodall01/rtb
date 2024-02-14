@@ -394,6 +394,10 @@ struct Answer {
     #[clap(short, default_value("512"))]
     n_results: usize,
 
+    /// The model to use.
+    #[clap(long, default_value("gpt-4-turbo-preview"))]
+    model: String,
+
     /// Write output, formatted as Roam markdown, to this file.
     #[clap(long, short('o'), default_value("/dev/stdout"))]
     output: PathBuf,
@@ -433,20 +437,32 @@ async fn exec_answer(conn: &mut SqliteConnection, args: &Answer) -> Result<()> {
             .wrap_err("Failed to add item to result forest")?;
     }
 
-    // Generate the answer.
-    let answer = {
-        let span = info_span!("Generating response");
-        let _guard = span.enter();
-        rtb::prompting::generate_answer(conn, &openai_client, &result_forest, &args.query)
-            .await
-            .wrap_err("Failed to generate response.")?
-    };
-
     // Write the answer to the output file.
     let mut output_file = std::fs::File::create(&args.output)
         .wrap_err_with(|| format!("Failed to create output file {:?}", args.output))?;
-    writeln!(output_file, "Query: `{}` #GPT", args.query)?;
-    writeln!(output_file, "{}", answer)?;
+
+    // Open the answer stream
+    {
+        let span = info_span!("Generating response");
+        let _guard = span.enter();
+        let mut stream = rtb::prompting::generate_answer(
+            conn,
+            &openai_client,
+            &args.model,
+            &result_forest,
+            &args.query,
+        )
+        .await
+        .wrap_err("Failed to generate response.")?;
+
+        // Write the answer to the output file.
+        writeln!(output_file, "Query: `{}` #GPT", args.query)?;
+        while let Some(answer) = stream.next().await {
+            let answer = answer?;
+            write!(output_file, "{}", answer)?;
+        }
+        writeln!(output_file)?;
+    };
 
     Ok(())
 }

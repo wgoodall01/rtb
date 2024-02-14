@@ -1,6 +1,9 @@
+use std::pin::Pin;
+
 use async_openai::types::Role;
 use diesel::{QueryDsl, RunQueryDsl, SqliteConnection};
-use eyre::{ContextCompat, Result, WrapErr};
+use eyre::{eyre, Result, WrapErr};
+use futures::{Stream, StreamExt};
 use indoc::formatdoc;
 
 use crate::{
@@ -9,16 +12,14 @@ use crate::{
     schema,
 };
 
-/// What model to use for question answering?
-pub const CHAT_MODEL: &str = "gpt-4-1106-preview";
-
 /// Generate an answer to a textual question.
 pub async fn generate_answer(
     conn: &mut SqliteConnection,
     openai_client: &async_openai::Client<async_openai::config::OpenAIConfig>,
+    model: &str,
     results: &ResultForest,
     question: &str,
-) -> Result<String> {
+) -> Result<Pin<Box<dyn Stream<Item = Result<String>>>>> {
     let mut prompt: Vec<(Role, String)> = vec![];
 
     prompt.push((
@@ -76,7 +77,7 @@ pub async fn generate_answer(
 
     // Build the OpenAI request.
     let chat_completion_request = async_openai::types::CreateChatCompletionRequest {
-        model: CHAT_MODEL.to_string(),
+        model: model.to_string(),
         messages: prompt
             .into_iter()
             .map(
@@ -90,21 +91,23 @@ pub async fn generate_answer(
         ..Default::default()
     };
 
-    let answer = openai_client
+    let chunk_stream = openai_client
         .chat()
-        .create(chat_completion_request)
+        .create_stream(chat_completion_request)
         .await
-        .wrap_err("Failed to generate answer from OpenAI")?;
+        .wrap_err("Failed to open result stream from OpenAI")?;
 
-    let response_message = answer
-        .choices
-        .into_iter()
-        .map(|choice| choice.message.content)
-        .next()
-        .flatten()
-        .wrap_err("OpenAI responded, but did not include a response message.")?;
+    let text_stream = chunk_stream.filter_map(|chunk| async move {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => return Some(Err(eyre!(e).wrap_err("Failed to get chunk from OpenAI"))),
+        };
+        let choice = chunk.choices.into_iter().next()?;
+        let msg = choice.delta.content?;
+        Some(Ok(msg))
+    });
 
-    Ok(response_message)
+    Ok(Box::pin(text_stream))
 }
 
 pub async fn format_results(conn: &mut SqliteConnection, results: &ResultForest) -> Result<String> {

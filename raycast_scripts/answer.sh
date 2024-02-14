@@ -17,7 +17,7 @@ source ".env"
 # Make a temp file for the answer
 answer="$(mktemp -t rtb_answer_XXXXXX.md)"
 
-./target/release/rtb answer -o "$answer" -- "$*"
+./target/release/rtb answer -o >(tee "$answer") -- "$*"
 
 echo
 echo
